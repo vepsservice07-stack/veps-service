@@ -1,0 +1,48 @@
+syntax = "proto3";
+package ledger;
+
+option go_package = "github.com/veps-service-480701/monolith-submitter/pkg/ledger";
+
+// ImmutableLedger service - accepts certified events from VEPS
+service ImmutableLedger {
+  // Submit a certified event for sealing (returns sequence number)
+  rpc SubmitEvent(CertifiedEvent) returns (SealedEvent);
+  
+  // Query a sealed event by sequence number
+  rpc GetEvent(GetEventRequest) returns (SealedEvent);
+  
+  // Health check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// Event certified by VEPS (passed all integrity checks)
+message CertifiedEvent {
+  string event_id = 1;           // Unique event ID from VEPS
+  bytes payload = 2;             // The actual event data
+  string veps_signature = 3;     // Cryptographic signature from VEPS
+  int64 veps_timestamp = 4;      // When VEPS certified this event
+  map<string, string> metadata = 5; // Additional context
+}
+
+// Event after sealing by the Ledger (assigned sequence number + hash)
+message SealedEvent {
+  uint64 sequence_number = 1;    // The definitive total order sequence
+  string event_id = 2;           // Original event ID from VEPS
+  bytes payload = 3;             // The event data
+  string event_hash = 4;         // SHA-256 hash of this event
+  string previous_hash = 5;      // Hash of previous event (chain link)
+  int64 sealed_timestamp = 6;    // When consensus was achieved
+  int64 commit_latency_ms = 7;   // Time taken to seal (should be <50ms)
+}
+
+message GetEventRequest {
+  uint64 sequence_number = 1;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string status = 2;
+  uint64 last_sequence_number = 3;
+}

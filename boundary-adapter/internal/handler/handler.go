@@ -40,6 +40,15 @@ type Response struct {
 	Duration  string      `json:"duration,omitempty"`
 }
 
+// PerformanceMetrics captures detailed timing
+type PerformanceMetrics struct {
+	StartTime     time.Time
+	EndTime       time.Time
+	TotalDuration time.Duration
+	Timestamps    map[string]time.Time
+	Breakdowns    map[string]time.Duration
+}
+
 // HealthCheck handles health check requests
 func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 	response := Response{
@@ -78,11 +87,11 @@ func (h *Handler) Warmup(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) IngestEvent(w http.ResponseWriter, r *http.Request) {
 	// Initialize performance metrics
 	metrics := &PerformanceMetrics{
-		StartTime: time.Now(),
+		StartTime:  time.Now(),
 		Timestamps: make(map[string]time.Time),
 		Breakdowns: make(map[string]time.Duration),
 	}
-	metrics.Timestamps["request_received"] = time.Now()
+	metrics.Timestamps["request_received"] = metrics.StartTime
 
 	// Only accept POST requests
 	if r.Method != http.MethodPost {
@@ -149,9 +158,12 @@ func (h *Handler) IngestEvent(w http.ResponseWriter, r *http.Request) {
 	
 	if routeEnd, ok := metrics.Timestamps["routing_completed"]; ok {
 		if routeStart, ok := metrics.Timestamps["routing_started"]; ok {
-			metrics.Breakdowns["routing_total_ms"] = routeEnd.Sub(routeStart)
+			metrics.Breakdowns["routing_ms"] = routeEnd.Sub(routeStart)
 		}
 	}
+	
+	// Calculate VEPS internal time (normalization + routing)
+	vepsInternal := metrics.Breakdowns["normalization_ms"] + metrics.Breakdowns["routing_ms"]
 	
 	// Success response with detailed timing
 	response := Response{
@@ -165,12 +177,12 @@ func (h *Handler) IngestEvent(w http.ResponseWriter, r *http.Request) {
 			"integrity_success": routeResult.IntegritySuccess,
 			"context_success":   routeResult.ContextSuccess,
 			"routing_duration":  routeResult.Duration.String(),
-			"performance_breakdown": map[string]interface{}{
+			"performance_breakdown": map[string]float64{
 				"total_ms":         float64(metrics.TotalDuration.Microseconds()) / 1000.0,
 				"parsing_ms":       float64(metrics.Breakdowns["parsing_ms"].Microseconds()) / 1000.0,
 				"normalization_ms": float64(metrics.Breakdowns["normalization_ms"].Microseconds()) / 1000.0,
-				"routing_ms":       float64(metrics.Breakdowns["routing_total_ms"].Microseconds()) / 1000.0,
-				"veps_internal_ms": float64((metrics.Breakdowns["normalization_ms"] + metrics.Breakdowns["routing_total_ms"]).Microseconds()) / 1000.0,
+				"routing_ms":       float64(metrics.Breakdowns["routing_ms"].Microseconds()) / 1000.0,
+				"veps_internal_ms": float64(vepsInternal.Microseconds()) / 1000.0,
 			},
 		},
 	}
@@ -178,18 +190,9 @@ func (h *Handler) IngestEvent(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[Handler] Event %s processed successfully - Total: %.2fms, VEPS Internal: %.2fms", 
 		event.ID, 
 		float64(metrics.TotalDuration.Microseconds())/1000.0,
-		float64((metrics.Breakdowns["normalization_ms"] + metrics.Breakdowns["routing_total_ms"]).Microseconds())/1000.0)
+		float64(vepsInternal.Microseconds())/1000.0)
+	
 	h.writeJSON(w, http.StatusOK, response)
-}
-
-// PerformanceMetrics captures detailed timing
-type PerformanceMetrics struct {
-	StartTime     time.Time
-	EndTime       time.Time
-	TotalDuration time.Duration
-	Timestamps    map[string]time.Time
-	Breakdowns    map[string]time.Duration
-}
 }
 
 // IngestBatch handles batch event ingestion

@@ -1,0 +1,450 @@
+openapi: 3.0.3
+info:
+  title: VEPS API Gateway
+  description: |
+    **VEPS (Validation-Enabled Processing System)** API Gateway provides a secure, high-performance interface for submitting events, checking causality, and retrieving event history.
+    
+    ## Features
+    - ⚡ Sub-100ms event submission
+    - 🔐 API key authentication
+    - 📊 Rate limiting (100-1000 req/min)
+    - 🔗 Total ordering via ImmutableLedger
+    - 📈 Causality queries with cryptographic proofs
+    
+    ## Authentication
+    All endpoints (except `/health`) require an API key in the `Authorization` header:
+    ```
+    Authorization: Bearer YOUR_API_KEY
+    ```
+    
+    ## Rate Limits
+    - **Standard**: 100 requests/minute
+    - **Premium**: 1000 requests/minute
+    
+    Rate limit exceeded responses return HTTP 429.
+    
+  version: 1.0.0
+  contact:
+    name: VEPS Support
+    email: support@veps.example.com
+
+servers:
+  - url: https://api-gateway-846963717514.us-east1.run.app
+    description: Production server
+
+security:
+  - BearerAuth: []
+
+paths:
+  /health:
+    get:
+      summary: Health Check
+      description: Check API Gateway health status
+      security: []  # No auth required
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "API Gateway is healthy"
+                  timestamp:
+                    type: string
+                    format: date-time
+                  data:
+                    type: object
+                    properties:
+                      gateway_ready:
+                        type: boolean
+                      database_healthy:
+                        type: boolean
+                      boundary_url:
+                        type: string
+
+  /api/v1/events:
+    post:
+      summary: Submit Event
+      description: Submit a new event to VEPS for processing and sequencing
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventSubmission'
+            examples:
+              flow_start:
+                summary: Flow State Start
+                value:
+                  event_type: "flow_start"
+                  user_id: "alice"
+                  note_id: 123
+                  bpm: 73
+                  duration_ms: 5000
+                  timestamp_client: 1702401234567
+                  metadata:
+                    session_id: "xyz"
+              pause:
+                summary: Pause Event
+                value:
+                  event_type: "pause"
+                  user_id: "bob"
+                  note_id: 456
+                  timestamp_client: 1702401240000
+      responses:
+        '200':
+          description: Event submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+    
+    get:
+      summary: Batch Retrieve Events
+      description: Retrieve multiple events based on filters
+      parameters:
+        - name: note_id
+          in: query
+          description: Filter by note ID
+          schema:
+            type: integer
+            example: 123
+        - name: user_id
+          in: query
+          description: Filter by user ID
+          schema:
+            type: string
+            example: "alice"
+        - name: start_seq
+          in: query
+          description: Start sequence number (inclusive)
+          schema:
+            type: integer
+            example: 1000000
+        - name: end_seq
+          in: query
+          description: End sequence number (inclusive)
+          schema:
+            type: integer
+            example: 2000000
+        - name: start_time
+          in: query
+          description: Start timestamp (ms since epoch)
+          schema:
+            type: integer
+            format: int64
+            example: 1702400000000
+        - name: end_time
+          in: query
+          description: End timestamp (ms since epoch)
+          schema:
+            type: integer
+            format: int64
+            example: 1702500000000
+        - name: limit
+          in: query
+          description: Maximum events to return (max 1000)
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+            example: 50
+      responses:
+        '200':
+          description: Events retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchResponse'
+        '400':
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /api/v1/causality:
+    get:
+      summary: Check Causality
+      description: Determine the causal relationship between two events
+      parameters:
+        - name: event_a
+          in: query
+          required: true
+          description: Sequence number of first event
+          schema:
+            type: integer
+            format: int64
+            example: 1234567890
+        - name: event_b
+          in: query
+          required: true
+          description: Sequence number of second event
+          schema:
+            type: integer
+            format: int64
+            example: 1234567900
+      responses:
+        '200':
+          description: Causality check complete
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CausalityResponse'
+        '400':
+          description: Missing or invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          description: One or both events not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API Key
+      description: API key for authentication
+
+  schemas:
+    EventSubmission:
+      type: object
+      required:
+        - event_type
+        - user_id
+        - timestamp_client
+      properties:
+        event_type:
+          type: string
+          description: Type of event
+          example: "flow_start"
+        user_id:
+          type: string
+          description: User identifier
+          example: "alice"
+        note_id:
+          type: integer
+          description: Note/document identifier
+          example: 123
+        bpm:
+          type: integer
+          description: Beats per minute (for rhythm tracking)
+          example: 73
+        duration_ms:
+          type: integer
+          description: Event duration in milliseconds
+          example: 5000
+        timestamp_client:
+          type: integer
+          format: int64
+          description: Client timestamp (ms since epoch)
+          example: 1702401234567
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Additional custom data
+          example:
+            session_id: "xyz"
+
+    EventResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Event submitted successfully"
+        timestamp:
+          type: string
+          format: date-time
+        data:
+          type: object
+          properties:
+            sequence_number:
+              type: integer
+              format: int64
+              description: Global sequence number from ImmutableLedger
+              example: 1234567890
+            vector_clock:
+              type: object
+              additionalProperties:
+                type: integer
+                format: int64
+              example:
+                boundary-adapter-us-east1-001: 1765373774648014271
+            proof_hash:
+              type: string
+              description: Cryptographic proof hash
+              example: "a3f9e2d1b8c4..."
+            timestamp_veps:
+              type: integer
+              format: int64
+              description: VEPS system timestamp (ms since epoch)
+              example: 1702401234589
+            event_id:
+              type: string
+              format: uuid
+              example: "550e8400-e29b-41d4-a716-446655440000"
+
+    CausalityResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Causality check complete"
+        timestamp:
+          type: string
+          format: date-time
+        data:
+          type: object
+          properties:
+            relationship:
+              type: string
+              enum: [happened-before, happened-after, concurrent]
+              description: Causal relationship between events
+              example: "happened-before"
+            time_delta_ms:
+              type: integer
+              format: int64
+              description: Time difference in milliseconds
+              example: 3420
+            confidence:
+              type: number
+              format: double
+              description: Confidence level (always 1.0 with total ordering)
+              example: 1.0
+
+    BatchResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Retrieved 25 events"
+        timestamp:
+          type: string
+          format: date-time
+        data:
+          type: object
+          properties:
+            events:
+              type: array
+              items:
+                $ref: '#/components/schemas/EventSummary'
+            total_count:
+              type: integer
+              example: 25
+
+    EventSummary:
+      type: object
+      properties:
+        sequence_number:
+          type: integer
+          format: int64
+          example: 1234567890
+        event_type:
+          type: string
+          example: "flow_start"
+        timestamp_veps:
+          type: integer
+          format: int64
+          example: 1702401234589
+        note_id:
+          type: integer
+          nullable: true
+          example: 123
+        user_id:
+          type: string
+          example: "alice"
+        metadata:
+          type: object
+          additionalProperties: true
+
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: string
+          example: "Invalid request"
+        timestamp:
+          type: string
+          format: date-time
+
+  responses:
+    UnauthorizedError:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+                example: false
+              error:
+                type: string
+                example: "Invalid API key"
+              timestamp:
+                type: string
+                format: date-time
+
+    RateLimitError:
+      description: Rate limit exceeded
+      headers:
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+          description: Requests per minute limit
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+                example: false
+              error:
+                type: string
+                example: "Rate limit exceeded. Limit: 100 requests per minute"
+              timestamp:
+                type: string
+                format: date-time

@@ -1,0 +1,190 @@
+#!/bin/bash
+
+# VEPS Complete Infrastructure Setup
+# Run this script to set up or verify the complete VEPS infrastructure
+
+set -e
+
+echo "======================================"
+echo "VEPS Infrastructure Setup"
+echo "======================================"
+echo ""
+
+# Configuration
+PROJECT_ID="veps-service-480701"
+REGION="us-east1"
+CLUSTER_NAME="veps-cluster"
+LEDGER_NAMESPACE="immutable-ledger"
+
+echo "Project: $PROJECT_ID"
+echo "Region: $REGION"
+echo "GKE Cluster: $CLUSTER_NAME"
+echo ""
+
+# Step 1: Verify GKE cluster and kubectl access
+echo "[Step 1] Verifying GKE cluster access..."
+if kubectl get nodes &>/dev/null; then
+    echo "✓ kubectl configured and cluster accessible"
+else
+    echo "Configuring kubectl for cluster ${CLUSTER_NAME}..."
+    gcloud container clusters get-credentials ${CLUSTER_NAME} \
+        --region=${REGION} \
+        --project=${PROJECT_ID}
+    echo "✓ kubectl configured"
+fi
+echo ""
+
+# Step 2: Check if ImmutableLedger is deployed
+echo "[Step 2] Checking ImmutableLedger deployment..."
+if kubectl get namespace ${LEDGER_NAMESPACE} &>/dev/null; then
+    echo "✓ ImmutableLedger namespace exists"
+    
+    # Check if ledger service exists
+    if kubectl get svc ledger-service -n ${LEDGER_NAMESPACE} &>/dev/null; then
+        echo "✓ Ledger service found"
+    else
+        echo "✗ Ledger service not found in namespace ${LEDGER_NAMESPACE}"
+        echo "Please deploy ImmutableLedger first"
+        exit 1
+    fi
+else
+    echo "✗ ImmutableLedger namespace not found"
+    echo "Please deploy ImmutableLedger first"
+    exit 1
+fi
+echo ""
+
+# Step 3: Expose Ledger externally (if not already exposed)
+echo "[Step 3] Setting up external LoadBalancer for ImmutableLedger..."
+if kubectl get svc ledger-external -n ${LEDGER_NAMESPACE} &>/dev/null; then
+    echo "LoadBalancer already exists"
+else
+    echo "Creating external LoadBalancer..."
+    kubectl expose service ledger-service \
+        --type=LoadBalancer \
+        --name=ledger-external \
+        --port=50051 \
+        --target-port=50051 \
+        -n ${LEDGER_NAMESPACE}
+    
+    echo "Waiting for external IP assignment (this takes 1-2 minutes)..."
+    kubectl wait --for=jsonpath='{.status.loadBalancer.ingress[0].ip}' \
+        svc/ledger-external \
+        -n ${LEDGER_NAMESPACE} \
+        --timeout=180s || true
+fi
+
+# Get external IP
+LEDGER_EXTERNAL_IP=$(kubectl get svc ledger-external -n ${LEDGER_NAMESPACE} -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+if [ -z "$LEDGER_EXTERNAL_IP" ] || [ "$LEDGER_EXTERNAL_IP" == "<pending>" ]; then
+    echo "⚠ External IP still pending, waiting longer..."
+    sleep 30
+    LEDGER_EXTERNAL_IP=$(kubectl get svc ledger-external -n ${LEDGER_NAMESPACE} -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+fi
+
+if [ -z "$LEDGER_EXTERNAL_IP" ]; then
+    echo "✗ Failed to get external IP for Ledger"
+    echo "Check status with: kubectl get svc ledger-external -n ${LEDGER_NAMESPACE}"
+    exit 1
+fi
+
+echo "✓ Ledger external IP: ${LEDGER_EXTERNAL_IP}"
+echo ""
+
+# Step 4: Update Monolith Submitter with correct Ledger address
+echo "[Step 4] Updating Monolith Submitter configuration..."
+if gcloud run services describe monolith-submitter --region=${REGION} &>/dev/null; then
+    echo "Updating Monolith Submitter with Ledger address..."
+    
+    # Get current secret key if it exists
+    VEPS_SECRET_KEY=$(gcloud run services describe monolith-submitter \
+        --region=${REGION} \
+        --format='value(spec.template.spec.containers[0].env.filter(name:VEPS_SECRET_KEY).value)' \
+        2>/dev/null || echo "")
+    
+    if [ -z "$VEPS_SECRET_KEY" ]; then
+        VEPS_SECRET_KEY=$(openssl rand -hex 32)
+        echo "Generated new VEPS_SECRET_KEY"
+    fi
+    
+    gcloud run services update monolith-submitter \
+        --region=${REGION} \
+        --set-env-vars "LEDGER_ADDRESS=${LEDGER_EXTERNAL_IP}:50051,VEPS_SECRET_KEY=${VEPS_SECRET_KEY},MONOLITH_NODE_ID=monolith-submitter-${REGION}-001"
+    
+    echo "✓ Monolith Submitter updated"
+else
+    echo "⚠ Monolith Submitter not deployed yet"
+    echo "Deploy with: ./deploy-monolith-submitter.sh"
+fi
+echo ""
+
+# Step 5: Get all service URLs
+echo "[Step 5] Gathering service URLs..."
+echo ""
+
+BOUNDARY_ADAPTER_URL=$(gcloud run services describe boundary-adapter --region=${REGION} --format='value(status.url)' 2>/dev/null || echo "NOT_DEPLOYED")
+VETO_SERVICE_URL=$(gcloud run services describe veto-service --region=${REGION} --format='value(status.url)' 2>/dev/null || echo "NOT_DEPLOYED")
+RDB_UPDATER_URL=$(gcloud run services describe rdb-updater --region=${REGION} --format='value(status.url)' 2>/dev/null || echo "NOT_DEPLOYED")
+DATA_FRACTURE_HANDLER_URL=$(gcloud run services describe data-fracture-handler --region=${REGION} --format='value(status.url)' 2>/dev/null || echo "NOT_DEPLOYED")
+MONOLITH_SUBMITTER_URL=$(gcloud run services describe monolith-submitter --region=${REGION} --format='value(status.url)' 2>/dev/null || echo "NOT_DEPLOYED")
+
+echo "======================================"
+echo "✓ Infrastructure Setup Complete!"
+echo "======================================"
+echo ""
+echo "VEPS Services:"
+echo "  Boundary Adapter:      ${BOUNDARY_ADAPTER_URL}"
+echo "  Veto Service:          ${VETO_SERVICE_URL}"
+echo "  RDB Updater:           ${RDB_UPDATER_URL}"
+echo "  Data Fracture Handler: ${DATA_FRACTURE_HANDLER_URL}"
+echo "  Monolith Submitter:    ${MONOLITH_SUBMITTER_URL}"
+echo ""
+echo "ImmutableLedger:"
+echo "  External IP: ${LEDGER_EXTERNAL_IP}:50051"
+echo "  Internal:    ledger-service.immutable-ledger.svc.cluster.local:50051"
+echo ""
+echo "Environment variables saved to ~/veps-setup.sh"
+echo ""
+
+# Step 6: Update veps-setup.sh
+cat > ~/veps-setup.sh << EOF
+#!/bin/bash
+# VEPS Environment Setup
+# Source this file: source ~/veps-setup.sh
+
+export PROJECT_ID="${PROJECT_ID}"
+export REGION="${REGION}"
+export BOUNDARY_ADAPTER_URL="${BOUNDARY_ADAPTER_URL}"
+export VETO_SERVICE_URL="${VETO_SERVICE_URL}"
+export RDB_UPDATER_URL="${RDB_UPDATER_URL}"
+export DATA_FRACTURE_HANDLER_URL="${DATA_FRACTURE_HANDLER_URL}"
+export MONOLITH_SUBMITTER_URL="${MONOLITH_SUBMITTER_URL}"
+export LEDGER_EXTERNAL_IP="${LEDGER_EXTERNAL_IP}"
+export LEDGER_ADDRESS="${LEDGER_EXTERNAL_IP}:50051"
+
+# Set gcloud defaults
+gcloud config set project \${PROJECT_ID}
+gcloud config set run/region \${REGION}
+
+echo "VEPS environment configured!"
+echo "  Project: \${PROJECT_ID}"
+echo "  Region: \${REGION}"
+echo ""
+echo "Service URLs loaded:"
+echo "  BOUNDARY_ADAPTER_URL"
+echo "  VETO_SERVICE_URL"
+echo "  RDB_UPDATER_URL"
+echo "  DATA_FRACTURE_HANDLER_URL"
+echo "  MONOLITH_SUBMITTER_URL"
+echo "  LEDGER_ADDRESS"
+EOF
+
+chmod +x ~/veps-setup.sh
+
+echo "To load environment variables in future sessions:"
+echo "  source ~/veps-setup.sh"
+echo ""
+echo "Test the setup:"
+echo "  curl \$MONOLITH_SUBMITTER_URL/health | jq '.data.ledger_healthy'"
+echo ""

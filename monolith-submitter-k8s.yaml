@@ -1,0 +1,113 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: veps
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: monolith-submitter-config
+  namespace: veps
+data:
+  LEDGER_ADDRESS: "ledger-service.immutable-ledger.svc.cluster.local:50051"
+  MONOLITH_NODE_ID: "monolith-submitter-gke-001"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: monolith-submitter
+  namespace: veps
+  labels:
+    app: monolith-submitter
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: monolith-submitter
+  template:
+    metadata:
+      labels:
+        app: monolith-submitter
+    spec:
+      containers:
+      - name: monolith-submitter
+        image: us-east1-docker.pkg.dev/veps-service-480701/veps-images/monolith-submitter:v1
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        env:
+        - name: PORT
+          value: "8080"
+        - name: LEDGER_ADDRESS
+          valueFrom:
+            configMapKeyRef:
+              name: monolith-submitter-config
+              key: LEDGER_ADDRESS
+        - name: MONOLITH_NODE_ID
+          valueFrom:
+            configMapKeyRef:
+              name: monolith-submitter-config
+              key: MONOLITH_NODE_ID
+        - name: VEPS_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: veps-secret-key
+              key: key
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 20
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 20
+          failureThreshold: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: monolith-submitter
+  namespace: veps
+  labels:
+    app: monolith-submitter
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  selector:
+    app: monolith-submitter
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: monolith-submitter-internal
+  namespace: veps
+  labels:
+    app: monolith-submitter
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  selector:
+    app: monolith-submitter
