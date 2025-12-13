@@ -1,0 +1,162 @@
+syntax = "proto3";
+
+package ledger;
+
+// ImmutableLedger service - accepts certified events from VEPS and streams to SRS Workers
+service ImmutableLedger {
+  rpc SubmitEvent(CertifiedEvent) returns (SealedEvent);
+  rpc StreamEvents(StreamEventsRequest) returns (stream SealedEvent);
+  rpc GetEvents(GetEventsRequest) returns (GetEventsResponse);
+  rpc GetEvent(GetEventRequest) returns (SealedEvent);
+  rpc GetEventHash(GetEventHashRequest) returns (GetEventHashResponse);
+  rpc GetShardInfo(GetShardInfoRequest) returns (ShardInfo);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ============================================================================
+// WRITE PLANE MESSAGES (VEPS → IL)
+// ============================================================================
+
+// Event certified by VEPS (passed all integrity checks)
+message CertifiedEvent {
+  // Core identity
+  string event_id = 1;           // Unique event ID from VEPS (UUID)
+  string tenant_id = 2;          // Tenant identifier (NEW)
+  
+  // Event metadata
+  string type = 3;               // Event type (e.g., "payment_processed")
+  string source = 4;             // Source system
+  int64 timestamp = 5;           // Original event timestamp (Unix nanos)
+  
+  // Actor information
+  Actor actor = 6;               // Who performed the action
+  
+  // Event data
+  bytes evidence_json = 7;       // JSON-encoded evidence/payload
+  bytes vector_clock_json = 8;   // JSON-encoded vector clock
+  
+  // VEPS certification
+  string veps_signature = 9;     // Cryptographic signature from VEPS
+  int64 veps_timestamp = 10;     // When VEPS certified this event
+  string boundary_node = 11;     // Which VEPS boundary node processed this
+  string correlation_id = 12;    // Distributed tracing ID
+  
+  // Additional metadata
+  map<string, string> metadata = 13; // Extra context
+}
+
+// Actor who performed the action
+message Actor {
+  string id = 1;                 // Actor ID (e.g., "user-123")
+  string name = 2;               // Actor display name
+  string type = 3;               // Actor type (e.g., "user", "system", "service")
+}
+
+// ============================================================================
+// READ PLANE MESSAGES (IL → SRS Workers)
+// ============================================================================
+
+// Event after sealing by the Ledger (assigned sequence number + hash)
+message SealedEvent {
+  // Ledger metadata
+  uint64 sequence_number = 1;    // The definitive total order sequence
+  string shard_id = 2;           // Which shard sealed this (NEW)
+  int64 sealed_timestamp = 3;    // When consensus was achieved
+  int64 commit_latency_ms = 4;   // Time taken to seal (should be <50ms)
+  
+  // Chain integrity
+  string event_hash = 5;         // SHA-256 hash of this event
+  string previous_hash = 6;      // Hash of previous event (chain link)
+  
+  // Original event data (from CertifiedEvent)
+  string event_id = 7;           // Original event ID from VEPS
+  string tenant_id = 8;          // Tenant identifier
+  string type = 9;               // Event type
+  string source = 10;            // Source system
+  int64 timestamp = 11;          // Original event timestamp
+  
+  // Actor information
+  Actor actor = 12;              // Who performed the action
+  
+  // Event payload
+  bytes evidence_json = 13;      // JSON-encoded evidence
+  bytes vector_clock_json = 14;  // JSON-encoded vector clock
+  
+  // VEPS metadata
+  string boundary_node = 15;     // VEPS boundary node
+  string correlation_id = 16;    // Distributed tracing ID
+  
+  // Additional metadata (optional)
+  map<string, string> metadata = 17;
+}
+
+// ============================================================================
+// STREAMING / BATCH READ
+// ============================================================================
+
+// Request to stream events (for SRS Workers)
+message StreamEventsRequest {
+  uint64 start_sequence = 1;     // Start from this sequence (exclusive)
+  uint32 batch_size = 2;         // Events per batch (default 100, max 1000)
+  bool follow = 3;               // If true, keep stream open for new events
+  string tenant_id = 4;          // Optional: filter by tenant (for tenant-specific workers)
+}
+
+// Request to get multiple events (batch alternative to streaming)
+message GetEventsRequest {
+  uint64 start_sequence = 1;     // Start from this sequence (exclusive)
+  uint32 limit = 2;              // Max events to return (default 100, max 1000)
+  string tenant_id = 3;          // Optional: filter by tenant
+}
+
+// Response with multiple events
+message GetEventsResponse {
+  repeated SealedEvent events = 1;
+  uint64 latest_sequence = 2;    // Current highest sequence number on this shard
+  bool has_more = 3;             // True if more events exist beyond this batch
+}
+
+// ============================================================================
+// QUERY MESSAGES
+// ============================================================================
+
+message GetEventRequest {
+  uint64 sequence_number = 1;
+}
+
+message GetShardInfoRequest {}
+
+message ShardInfo {
+  string shard_id = 1;           // Shard identifier
+  uint64 latest_sequence = 2;    // Highest sequence number
+  int64 event_count = 3;         // Total events sealed
+  int64 tenant_count = 4;        // Unique tenants on this shard
+  string leader_node = 5;        // Current Raft leader
+  repeated string follower_nodes = 6; // Raft followers
+  int64 uptime_seconds = 7;      // Shard uptime
+}
+
+// Request to get the cryptographic hash of an event
+message GetEventHashRequest {
+  uint64 sequence_number = 1;
+}
+
+// Response containing only the event hash
+message GetEventHashResponse {
+  // The cryptographic hash of the sealed event
+  string event_hash = 1;
+}
+
+// ============================================================================
+// HEALTH CHECK
+// ============================================================================
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;             // "healthy", "degraded", "unhealthy"
+  string shard_id = 2;           // Which shard responded
+  bool is_leader = 3;            // Is this the Raft leader?
+  uint64 latest_sequence = 4;     // Latest sequence number
+  int64 response_time_ms = 5;    // Time to respond
+}
